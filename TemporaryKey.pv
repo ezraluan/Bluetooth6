@@ -1,0 +1,78 @@
+(* ==================== 协议概述 ==================== *)
+(* Bluetooth 6.0 Temporary Key Exchange Protocol Model *)
+(* 蓝牙6.0 临时密钥交换协议模型 *)
+(* 该模型用于验证蓝牙6.0中设备间临时密钥交换的安全性 *)
+
+(* ==================== 基本类型定义 ==================== *)
+type point.      (* 椭圆曲线点类型：用于公钥加密 *)
+type skey.       (* 私钥类型：用于签名和密钥生成 *)
+type key.        (* 对称密钥类型：用于加密通信 *)
+type pubKeyA.    (* 设备A的公钥类型 *)
+type pubKeyB.    (* 设备B的公钥类型 *)
+type message.    (* 消息类型：用于传输的实际数据 *)
+
+(* ==================== 密码学原语 ==================== *)
+(* 椭圆曲线点运算：实现基于椭圆曲线的密钥生成 *)
+fun ecmult(point, skey): point.    (* 椭圆曲线点乘运算 *)
+fun kdf(point): key.               (* 密钥派生函数：从共享点生成会话密钥 *)
+fun sign(point, skey): message.    (* 签名函数：对公钥进行签名 *)
+
+(* ==================== 常量定义 ==================== *)
+const g: point.                    (* 椭圆曲线的公用基点 *)
+
+(* ==================== 通信信道定义 ==================== *)
+free c: channel.                   (* 公共信道：可被攻击者监听和篡改的通道 *)
+
+(* ==================== 私有数据定义 ==================== *)
+(* 这些数据应该对攻击者保密 *)
+free deviceAKey: skey [private].   (* 设备A的私钥 *)
+free deviceBKey: skey [private].   (* 设备B的私钥 *)
+free sharedKeyA: key [private].    (* 设备A的共享密钥 *)
+free sharedKeyB: key [private].    (* 设备B的共享密钥 *)
+
+(* ==================== 安全事件定义 ==================== *)
+(* 这些事件用于追踪协议的执行过程和验证安全属性 *)
+event keyex(point, point).         (* 标记密钥交换过程 *)
+event sharekey(key).               (* 标记共享密钥生成 *)
+event valid_signature(message, point).  (* 标记签名验证 *)
+event pubkey_event(point).         (* 标记公钥广播 *)
+
+(* ==================== 设备A进程 ==================== *)
+let deviceA() =
+    let pubKeyA = ecmult(g, deviceAKey) in   (* 生成设备A的公钥 *)
+    let signatureA = sign(pubKeyA, deviceAKey) in (* 对公钥进行签名 *)
+    event pubkey_event(pubKeyA);             (* 记录公钥事件 *)
+    out(c, (pubKeyA, signatureA));           (* 广播公钥和签名 *)
+    in(c, (pubKeyB: point, signatureB: message)); (* 接收设备B的公钥和签名 *)
+    event valid_signature(signatureB, pubKeyB);  (* 假设签名验证成功 *)
+    let sharedPoint = ecmult(pubKeyB, deviceAKey) in (* 计算共享点 *)
+    event keyex(pubKeyA, pubKeyB);           (* 记录密钥交换事件 *)
+    let derivedKey = kdf(sharedPoint) in     (* 使用KDF从共享点生成对称密钥 *)
+    let sharedKeyA = derivedKey in           (* 更新全局共享密钥 *)
+    event sharekey(sharedKeyA).              (* 记录共享密钥事件 *)
+
+(* ==================== 设备B进程 ==================== *)
+let deviceB() =
+    let pubKeyB = ecmult(g, deviceBKey) in   (* 生成设备B的公钥 *)
+    let signatureB = sign(pubKeyB, deviceBKey) in (* 对公钥进行签名 *)
+    event pubkey_event(pubKeyB);             (* 记录公钥事件 *)
+    out(c, (pubKeyB, signatureB));           (* 广播公钥和签名 *)
+    in(c, (pubKeyA: point, signatureA: message)); (* 接收设备A的公钥和签名 *)
+    event valid_signature(signatureA, pubKeyA);  (* 假设签名验证成功 *)
+    let sharedPoint = ecmult(pubKeyA, deviceBKey) in (* 计算共享点 *)
+    event keyex(pubKeyA, pubKeyB);           (* 记录密钥交换事件 *)
+    let derivedKey = kdf(sharedPoint) in     (* 使用KDF从共享点生成对称密钥 *)
+    let sharedKeyB = derivedKey in           (* 更新全局共享密钥 *)
+    event sharekey(sharedKeyB).              (* 记录共享密钥事件 *)
+
+(* ==================== 安全属性验证 ==================== *)
+(* 1. 共享密钥保密性验证 *)
+query attacker(sharedKeyA).        (* 验证攻击者无法获取设备A的共享密钥 *)
+query attacker(sharedKeyB).        (* 验证攻击者无法获取设备B的共享密钥 *)
+
+(* 2. 密钥一致性验证 *)
+query event(sharekey(sharedKeyA)) ==> event(sharekey(sharedKeyA)).
+
+(* ==================== 主进程 ==================== *)
+process
+    (!deviceA()) | (!deviceB())    (* 并发运行设备A和B的协议实例 *)

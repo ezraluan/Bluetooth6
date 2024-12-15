@@ -1,0 +1,85 @@
+(* ==================== 协议概述 ==================== *)
+(* Bluetooth 6.0 Bidirectional Authentication Protocol Model *)
+(* 蓝牙6.0 双向认证协议模型 *)
+(* 该模型用于验证蓝牙6.0中客户端与服务器之间的双向认证安全性 *)
+
+(* ==================== 基本类型定义 ==================== *)
+type key.     (* 对称密钥类型：用于加密通信 *)
+type skey.    (* 非对称私钥类型：用于解密 *)
+type pkey.    (* 非对称公钥类型：用于加密 *)
+type sskey.   (* 签名私钥类型：用于生成签名 *)
+type spkey.   (* 签名公钥类型：用于验证签名 *)
+type nonce.   (* 随机数类型：用于防止重放攻击 *)
+
+(* ==================== 密码学原语 ==================== *)
+(* 对称加密函数和规则 *)
+fun senc(bitstring, key): bitstring.
+reduc forall m: bitstring, k: key; sdec(senc(m,k),k) = m.
+
+(* 非对称加密函数和规则 *)
+fun pk(skey): pkey.
+fun aenc(bitstring, pkey): bitstring.
+reduc forall m: bitstring, sk: skey; adec(aenc(m,pk(sk)),sk) = m.
+
+(* 数字签名函数和规则 *)
+fun spk(sskey): spkey.
+fun sign(bitstring, sskey): bitstring.
+reduc forall m: bitstring, ssk: sskey; getmess(sign(m,ssk)) = m.
+reduc forall m: bitstring, ssk: sskey; checksign(sign(m,ssk),spk(ssk)) = m.
+
+(* 随机数生成和类型转换函数 *)
+fun gen_nonce(): nonce.
+fun bitstring_of_nonce(nonce): bitstring.
+fun nonce_of_bitstring(bitstring): nonce.
+
+(* ==================== 通信信道定义 ==================== *)
+free c: channel.        (* 公共通信信道 *)
+free s: bitstring [private].  (* 私有通信内容 *)
+
+(* ==================== 安全事件定义 ==================== *)
+event acceptsClient(key).          (* 客户端接受会话密钥事件 *)
+event acceptsServer(key,pkey).     (* 服务器接受客户端公钥和会话密钥事件 *)
+event termClient(key,pkey).        (* 客户端完成认证事件 *)
+event termServer(key).             (* 服务器完成认证事件 *)
+
+(* ==================== 安全属性验证 ==================== *)
+(* 验证私有数据的保密性 *)
+query attacker(s).
+
+(* 验证认证过程的完整性 *)
+query x:key,y:pkey; 
+    event(termClient(x,y))==>event(acceptsServer(x,y)).
+query x:key; 
+    inj-event(termServer(x))==>inj-event(acceptsClient(x)).
+
+(* Client process *)
+let clientA(pkA:pkey,skA:skey,pkB:spkey) = 
+    out(c,pkA); (* 客户端发送公钥 *)
+    in(c,x:bitstring); (* 客户端接收服务器消息 *)
+    let y = adec(x,skA) in (* 使用私钥解密消息 *)
+    let (n:nonce,=pkA,=pkB,k:key) = checksign(y,pkB) in (* 验证签名并提取信息 *)
+    event acceptsClient(k); (* 客户端接受事件 *)
+    out(c,senc(s,k)); (* 客户端发送加密的消息 *)
+    out(c,senc(bitstring_of_nonce(n),k)); (* 客户端发送随机数 *)  
+    event termClient(k,pkA). (* 客户端终止事件 *)
+
+(* Server process *)
+let serverB(pkB:spkey, skB:sskey, pkA:pkey) = 
+    let n:nonce = gen_nonce() in (* 服务器生成随机数 *)
+    in(c,pkX:pkey); (* 服务器接收客户端公钥 *)
+    new k:key; (* 服务器生成新的会话密钥 *)
+    event acceptsServer(k,pkX); (* 服务器接受事件 *)
+    out(c,aenc(sign(bitstring_of_nonce(n),skB),pkX)); (* 服务器发送加密的签名消息 *)
+    in(c,enc_nonceX:bitstring); (* 服务器接收客户端加密的随机数 *)
+    let nonceX = nonce_of_bitstring(sdec(enc_nonceX,k)) in (* 使用会话密钥解密客户端发送的随机数 *)
+    in(c,x:bitstring); (* 服务器接收客户端消息 *)
+    let z = sdec(x,k) in (* 使用会话密钥解密消息 *)
+    if pkX = pkA && nonceX = n then event termServer(k). (* 如果公钥和随机数匹配，则服务器终止 *)
+
+(* Process composition *)
+process 
+    new skA:skey; (* 生成客户端私钥 *)
+    new skB:sskey; (* 生成服务器签名私钥 *)
+    let pkA = pk(skA) in out(c,pkA); (* 生成并发送客户端公钥 *)
+    let pkB = spk(skB) in out(c,pkB); (* 生成并发送服务器签名公钥 *)
+    ( (!clientA(pkA,skA,pkB)) | (!serverB(pkB,skB,pkA)) ) (* 并行运行客户端和服务器过程 *)

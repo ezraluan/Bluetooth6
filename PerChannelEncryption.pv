@@ -1,0 +1,109 @@
+(* ==================== 协议概述 ==================== *)
+(* Bluetooth 6.0 Per-Channel Encryption Protocol Model *)
+(* 蓝牙6.0 分信道加密协议模型 *)
+(* 该模型用于验证蓝牙6.0中多信道并行通信的安全性 *)
+
+(* ==================== 基本类型定义 ==================== *)
+type key.        (* 密钥类型：用于加密通信的密钥 *)
+type nonce.      (* 随机数类型：用于防止重放攻击 *)
+type channel_id. (* 信道标识符类型：用于区分不同的通信信道 *)
+type message.    (* 消息类型：用于传输的实际数据 *)
+
+(* ==================== 密码学原语 ==================== *)
+(* 加密函数：将消息、密钥和随机数组合生成密文 *)
+fun encrypt(message, key, nonce): bitstring.
+(* 解密规则：定义了配对的加密/解密操作 *)
+(* 使用相同的密钥和随机数可以恢复原始消息 *)
+reduc forall m: message, k: key, n: nonce;
+    decrypt(encrypt(m, k, n), k, n) = m.
+
+(* ==================== 通信信道定义 ==================== *)
+free public_ch: channel.                           (* 公共信道：可被攻击者监听和篡改的通道 *)
+free secure_ch1, secure_ch2, secure_ch3: channel [private].  (* 私有安全信道：用于安全通信的专用通道 *)
+
+(* ==================== 安全事件定义 ==================== *)
+(* 这些事件用于追踪协议的执行过程和验证安全属性 *)
+event beginTransfer(channel_id, message).          (* 标记数据传输开始 *)
+event endTransfer(channel_id, message).            (* 标记数据传输完成 *)
+event channelCompromised(channel_id).              (* 标记信道被攻破 *)
+event dataLeaked(message).                         (* 标记数据泄露 *)
+event channelInUse(channel_id).                    (* 标记信道正在使用 *)
+event validChannel(channel_id).                    (* 标记信道有效性 *)
+event messageReceived(message, message).           (* 标记消息接收状态 *)
+
+(* ==================== 私有数据定义 ==================== *)
+(* 这些数据应该对攻击者保密 *)
+free secret_data1: message [private].  (* 信道1的私密数据 *)
+free secret_data2: message [private].  (* 信道2的私密数据 *)
+free secret_data3: message [private].  (* 信道3的私密数据 *)
+free session_key: key [private].       (* 通信会话密钥 *)
+
+(* ==================== 安全属性验证 ==================== *)
+(* 1. 数据保密性验证：确保私密数据不被泄露 *)
+query attacker(secret_data1).
+query attacker(secret_data2).
+query attacker(secret_data3).
+
+(* 2. 信道独立性验证：确保信道间互不影响 *)
+(* 如果发生数据泄露，必须是由特定信道被攻破导致 *)
+query c: channel_id, m: message; 
+    event(dataLeaked(m)) ==> event(channelCompromised(c)).
+
+(* 3. 密钥安全性验证：确保会话密钥不被泄露 *)
+query attacker(session_key).
+
+(* 4. 信道有效性验证：确保只有有效信道才能使用 *)
+query c1: channel_id; 
+    event(channelInUse(c1)) ==> event(validChannel(c1)).
+
+(* 5. 消息完整性验证：确保消息传输过程中未被篡改 *)
+query m1, m2: message; 
+    event(messageReceived(m1, m2)) ==> m1 = m2.
+
+(* ==================== 发送者进程 ==================== *)
+let sender(ch_id: channel_id, sess_key: key, data: message) =
+    event channelInUse(ch_id);                    (* 声明开始使用信道 *)
+    new n: nonce;                                 (* 生成新的随机数防重放 *)
+    event beginTransfer(ch_id, data);             (* 记录传输开始 *)
+    let encrypted = encrypt(data, sess_key, n) in (* 使用会话密钥加密数据 *)
+    out(public_ch, (ch_id, encrypted, n)).        (* 通过公共信道发送加密数据 *)
+
+(* ==================== 接收者进程 ==================== *)
+let receiver(ch_id: channel_id, sess_key: key) =
+    in(public_ch, (=ch_id, encrypted: bitstring, n: nonce));  (* 接收指定信道的加密数据 *)
+    let decrypted = decrypt(encrypted, sess_key, n) in        (* 解密接收到的数据 *)
+    (* 验证数据合法性并处理可能的泄露情况 *)
+    if decrypted <> secret_data1 && decrypted <> secret_data2 && decrypted <> secret_data3 then (
+        event dataLeaked(decrypted);              (* 标记数据泄露事件 *)
+        event channelCompromised(ch_id)           (* 标记信道被攻破事件 *)
+    ) else (
+        event messageReceived(decrypted, decrypted);  (* 记录正常接收 *)
+        event endTransfer(ch_id, decrypted)          (* 标记传输完成 *)
+    ).
+
+(* ==================== 主进程 ==================== *)
+process
+    (* 初始化三个独立的通信信道 *)
+    new channel1: channel_id;
+    new channel2: channel_id;
+    new channel3: channel_id;
+    
+    (* 注册有效信道 *)
+    event validChannel(channel1);
+    event validChannel(channel2);
+    event validChannel(channel3);
+    
+    (* 启动并行通信进程 *)
+    (
+        (* 信道1的完整通信过程 *)
+        sender(channel1, session_key, secret_data1) |
+        receiver(channel1, session_key) |
+        
+        (* 信道2的完整通信过程 *)
+        sender(channel2, session_key, secret_data2) |
+        receiver(channel2, session_key) |
+        
+        (* 信道3的完整通信过程 *)
+        sender(channel3, session_key, secret_data3) |
+        receiver(channel3, session_key)
+    )

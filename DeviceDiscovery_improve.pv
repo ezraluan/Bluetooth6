@@ -1,0 +1,149 @@
+(* ==================== 协议概述 ==================== *)
+(* Bluetooth 6.0 Device Discovery Protocol Model *)
+(* 蓝牙6.0 设备发现协议模型 *)
+(* 该模型用于验证蓝牙6.0中设备发现过程的安全性 *)
+
+(* ==================== 基本类型定义 ==================== *)
+type address.     (* 设备地址类型：用于设备标识 *)
+type skey.        (* 私钥类型：用于签名和解密 *)
+type pkey.        (* 公钥类型：用于验证和加密 *)
+type message.     (* 消息类型：用于通用数据传输 *)
+type nonce.       (* 随机数类型：用于防止重放攻击 *)
+type nonceA.      (* 设备A随机数类型：用于A设备的挑战响应 *)
+type nonceB.      (* 设备B随机数类型：用于B设备的挑战响应 *)
+type session.     (* 会话标识符类型：用于标识通信会话 *)
+type uid.         (* 唯一标识符类型：用于设备唯一性识别 *)
+
+(* ==================== 密码学原语 ==================== *)
+fun pk(skey): pkey.                       (* 公钥生成：从私钥生成对应的公钥 *)
+fun sign(message, skey): message.         (* 签名生成：使用私钥对消息进行签名 *)
+fun verify(message, pkey): message.       (* 签名验证：使用公钥验证签名消息 *)
+fun encrypt(message, pkey): message.      (* 加密：使用公钥加密消息 *)
+fun decrypt(message, skey): message.      (* 解密：使用私钥解密消息 *)
+
+(* ==================== 类型转换函数 ==================== *)
+fun address_to_message(address): message.    (* 地址转消息：用于传输地址信息 *)
+fun message_to_address(message): address.    (* 消息转地址：用于解析地址信息 *)
+fun nonceA_to_message(nonceA): message.     (* A随机数转消息：用于传输A的随机数 *)
+fun message_to_nonceA(message): nonceA.     (* 消息转A随机数：用于解析A的随机数 *)
+fun nonceB_to_message(nonceB): message.     (* B随机数转消息：用于传输B的随机数 *)
+fun message_to_nonceB(message): nonceB.     (* 消息转B随机数：用于解析B的随机数 *)
+fun session_to_message(session): message.    (* 会话标识转消息：用于传输会话信息 *)
+fun message_to_session(message): session.    (* 消息转会话标识：用于解析会话信息 *)
+fun uid_to_message(uid): message.           (* 标识符转消息：用于传输设备标识 *)
+fun message_to_uid(message): uid.           (* 消息转标识符：用于解析设备标识 *)
+
+(* ==================== 消息操作函数 ==================== *)
+fun concatenate(message, message): message.  (* 消息合并：连接两个消息 *)
+fun extract_first(message): message.         (* 提取首部：获取合并消息的第一部分 *)
+fun extract_second(message): message.        (* 提取尾部：获取合并消息的第二部分 *)
+
+(* ==================== 通信信道定义 ==================== *)
+free c: channel.  (* 公共通信信道：可被监听和篡改的开放通道 *)
+
+(* ==================== 私有数据定义 ==================== *)
+free deviceAKey: skey [private].         (* 设备A的私钥：用于签名和解密 *)
+free deviceBKey: skey [private].         (* 设备B的私钥：用于签名和解密 *)
+free randomAddress: address [private].    (* 随机匿名地址：用于设备匿名通信 *)
+free randomNonceA: nonceA [private].     (* 设备A的随机数：用于挑战响应 *)
+free randomNonceB: nonceB [private].     (* 设备B的随机数：用于挑战响应 *)
+free sessionID: session [private].       (* 会话标识符：用于标识当前会话 *)
+free uniqueID: uid [private].            (* 唯一标识符：用于设备识别 *)
+
+(* ==================== 安全事件定义 ==================== *)
+event broadcast(address, pkey, nonceA, session, uid).   (* 广播事件：记录设备广播行为 *)
+event receive(address, pkey, nonceA, session, uid).     (* 接收事件：记录设备接收行为 *)
+event validate(address, pkey, nonceA, session, uid).    (* 验证事件：记录基本验证完成 *)
+event enhanced_validate(address, pkey, nonceA, nonceB, session, uid). (* 增强验证事件：记录双向验证完成 *)
+
+(* 广播设备的过程 *)
+let broadcaster() =
+    (* 生成设备 A 的公钥 *)
+    let deviceAPubKey = pk(deviceAKey) in
+
+    (* 广播设备 A 的公钥 *)
+    out(c, deviceAPubKey);
+
+    (* 使用设备 B 的公钥加密随机匿名地址 *)
+    let encryptedAddress = encrypt(address_to_message(randomAddress), pk(deviceBKey)) in
+
+    (* 将随机数、会话标识符和唯一标识符转换为消息类型 *)
+    let nonceAAsMessage = nonceA_to_message(randomNonceA) in
+    let sessionAsMessage = session_to_message(sessionID) in
+    let uidAsMessage = uid_to_message(uniqueID) in
+
+    (* 构建签名消息 *)
+    let signedMessage = concatenate(concatenate(encryptedAddress, nonceAAsMessage), concatenate(sessionAsMessage, uidAsMessage)) in
+    let signedData = sign(signedMessage, deviceAKey) in
+
+    (* 广播签名数据 *)
+    out(c, signedData);
+
+    (* 记录广播事件 *)
+    event broadcast(randomAddress, deviceAPubKey, randomNonceA, sessionID, uniqueID);
+
+    (* 接收来自设备 B 的签名响应 *)
+    in(c, responseSignedData: message);
+
+    (* 验证设备 B 的签名响应 *)
+    let responseVerified = verify(responseSignedData, pk(deviceBKey)) in
+    let receivedNonceB = message_to_nonceB(responseVerified) in
+
+    (* 验证随机数一致性 *)
+    if receivedNonceB = randomNonceB then (
+        event validate(randomAddress, deviceAPubKey, randomNonceA, sessionID, uniqueID);
+        event enhanced_validate(randomAddress, deviceAPubKey, randomNonceA, randomNonceB, sessionID, uniqueID)).
+
+(* 接收设备的过程 *)
+let receiver() =
+    (* 接收设备 A 的公钥 *)
+    in(c, receivedPubKey: pkey);
+
+    (* 接收设备 A 的签名数据 *)
+    in(c, receivedSignedData: message);
+
+    (* 验证签名数据的完整性 *)
+    let verifiedMessage = verify(receivedSignedData, receivedPubKey) in
+
+    (* 提取加密的随机匿名地址，并使用设备 B 的私钥解密 *)
+    let encryptedAddress = extract_first(verifiedMessage) in
+    let decryptedAddress = message_to_address(decrypt(encryptedAddress, deviceBKey)) in
+
+    (* 提取随机数、会话标识符和唯一标识符 *)
+    let rest = extract_second(verifiedMessage) in
+    let nonceAAsMessage = extract_first(rest) in
+    let finalPart = extract_second(rest) in
+    let sessionAsMessage = extract_first(finalPart) in
+    let uidAsMessage = extract_second(finalPart) in
+
+    (* 验证解密地址是否匹配 *)
+    if decryptedAddress = randomAddress then (
+        let verifiedNonceA = message_to_nonceA(nonceAAsMessage) in
+        let verifiedSession = message_to_session(sessionAsMessage) in
+        let verifiedUID = message_to_uid(uidAsMessage) in
+
+        (* 使用设备 B 的私钥生成签名响应 *)
+        let nonceBAsMessage = nonceB_to_message(randomNonceB) in
+        let responseSignedData = sign(nonceBAsMessage, deviceBKey) in
+
+        (* 返回签名响应给设备 A *)
+        out(c, responseSignedData);
+
+        (* 记录接收事件 *)
+        event receive(decryptedAddress, receivedPubKey, verifiedNonceA, verifiedSession, verifiedUID)).
+
+(* 安全目标验证 *)
+(* 机密性目标：攻击者无法推导随机匿名地址 *)
+query attacker(randomAddress).
+
+(* 数据完整性目标：接收的地址、随机值、会话和唯一标识符必须与广播一致 *)
+query x: address, k: pkey, n: nonceA, s: session, u: uid;
+    event(receive(x, k, n, s, u)) ==> event(broadcast(x, k, n, s, u)).
+
+(* 增强防伪造目标：验证随机数的一致性 *)
+query x: address, k: pkey, nA: nonceA, nB: nonceB, s: session, u: uid;
+    inj-event(validate(x, k, nA, s, u)) ==> inj-event(enhanced_validate(x, k, nA, nB, s, u)).
+
+(* 协议的整体流程 *)
+process
+    (!broadcaster()) | (!receiver())
