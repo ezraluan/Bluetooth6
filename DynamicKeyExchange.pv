@@ -1,0 +1,106 @@
+(* ==================== 协议概述 ==================== *)
+(* Bluetooth Dynamic Key Exchange Protocol Model *)
+(* 蓝牙动态密钥交换协议模型 *)
+(* 该模型用于验证设备间动态密钥交换和更新的安全性 *)
+
+(* ==================== 基本类型定义 ==================== *)
+type address.        (* 设备地址类型：用于标识通信设备 *)
+type skey.           (* 私钥类型：用于非对称加密 *)
+type pkey.           (* 公钥类型：用于非对称加密 *)
+type shared_key.     (* 共享密钥类型：ECDH密钥交换后的共享密钥 *)
+type session_key.    (* 会话密钥类型：用于加密通信的临时密钥 *)
+type message.        (* 消息类型：用于传输的实际数据 *)
+type nonce.          (* 随机数类型：用于防止重放攻击 *)
+type tag.            (* MAC类型：消息认证码，用于完整性校验 *)
+
+(* ==================== 密码学原语 ==================== *)
+(* 加密和认证函数 *)
+fun aes_ctr_encrypt(message, session_key): message.   (* AES-CTR模式加密 *)
+fun aes_ctr_decrypt(message, session_key): message.   (* AES-CTR模式解密 *)
+fun aes_cbc_mac(message, session_key): tag.          (* AES-CBC-MAC消息认证 *)
+
+(* 密钥生成和更新函数 *)
+fun generate_session_key(shared_key, nonce): session_key.   (* 基于共享密钥生成会话密钥 *)
+fun update_session_key(session_key, nonce): session_key.    (* 动态更新会话密钥 *)
+fun pk(skey): pkey.                                         (* 基于私钥生成公钥 *)
+
+(* 类型转换函数 *)
+fun address_to_message(address): message.    (* 地址转消息格式 *)
+fun pkey_to_message(pkey): message.         (* 公钥转消息格式 *)
+
+(* ==================== 通信信道定义 ==================== *)
+free c: channel.     (* 公共通信信道：可被监听和篡改 *)
+
+(* ==================== 私有数据定义 ==================== *)
+(* 这些数据对攻击者保密 *)
+free deviceAKey: skey [private].           (* 设备A的私钥 *)
+free deviceBKey: skey [private].           (* 设备B的私钥 *)
+free sharedKey: shared_key [private].      (* ECDH共享密钥 *)
+free randomNonceA: nonce [private].        (* 设备A的随机数 *)
+free randomNonceB: nonce [private].        (* 设备B的随机数 *)
+free randomNonceC: nonce [private].        (* 密钥更新随机数 *)
+free current_session_key: session_key [private].  (* 当前会话密钥 *)
+
+(* ==================== 安全事件定义 ==================== *)
+(* 这些事件用于追踪协议的执行过程和验证安全属性 *)
+event session_key_generated(session_key).   (* 会话密钥生成事件 *)
+event data_encrypted(message, tag, session_key).    (* 数据加密事件 *)
+event data_decrypted(message, session_key).         (* 数据解密事件 *)
+event mac_generated(message, tag, session_key).     (* MAC生成事件 *)
+event mac_verified(message, tag, session_key).      (* MAC验证事件 *)
+event session_key_updated(session_key).             (* 密钥更新事件 *)
+
+(* ==================== 设备A进程 ==================== *)
+let deviceA() =
+    (* 1. 会话密钥生成阶段 *)
+    let current_sessionKey = generate_session_key(sharedKey, randomNonceA) in
+    event session_key_generated(current_sessionKey);
+
+    (* 2. 加密通信和认证阶段 *)
+    let deviceAPubKey = pk(deviceAKey) in
+    let dataToSend = pkey_to_message(deviceAPubKey) in
+    let encryptedData = aes_ctr_encrypt(dataToSend, current_sessionKey) in
+    let macTag = aes_cbc_mac(dataToSend, current_sessionKey) in
+    event mac_generated(dataToSend, macTag, current_sessionKey);
+    out(c, (encryptedData, macTag));
+    event data_encrypted(encryptedData, macTag, current_sessionKey);
+
+    (* 3. 密钥更新阶段 *)
+    let updatedSessionKey = update_session_key(current_sessionKey, randomNonceC) in
+    event session_key_updated(updatedSessionKey).
+
+(* ==================== 设备B进程 ==================== *)
+let deviceB() =
+    (* 1. 会话密钥生成阶段 *)
+    let current_sessionKey = generate_session_key(sharedKey, randomNonceA) in
+    event session_key_generated(current_sessionKey);
+
+    (* 2. 数据接收和验证阶段 *)
+    in(c, (receivedEncryptedData: message, receivedMacTag: tag));
+    let decryptedData = aes_ctr_decrypt(receivedEncryptedData, current_sessionKey) in
+    let computedMacTag = aes_cbc_mac(decryptedData, current_sessionKey) in
+    if receivedMacTag = computedMacTag then
+        event mac_verified(decryptedData, receivedMacTag, current_sessionKey);
+
+    (* 3. 密钥更新阶段 *)
+    let updatedSessionKey = update_session_key(current_sessionKey, randomNonceC) in
+    event session_key_updated(updatedSessionKey).
+
+(* ==================== 安全属性验证 ==================== *)
+(* 1. 会话密钥保密性验证 *)
+query attacker(current_session_key).
+
+(* 2. 数据加密安全性验证 *)
+query x: message, t: tag, k: session_key; 
+    event(data_encrypted(x, t, k)) ==> attacker(x).
+
+(* 3. 消息完整性验证 *)
+query x: message, t: tag, k: session_key; 
+    event(mac_verified(x, t, k)) ==> event(data_encrypted(x, t, k)).
+
+(* 4. 动态密钥安全性验证 *)
+query attacker(current_session_key).
+
+(* ==================== 主进程 ==================== *)
+process
+    (!deviceA()) | (!deviceB())
